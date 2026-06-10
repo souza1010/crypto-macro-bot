@@ -43,12 +43,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Fontes de dados (APIs gratuitas) ────────────────────────────
 FEEDS = {
-    "fed_news":       "https://feeds.feedburner.com/federalreserve/news",
-    "investing_macro": "https://www.investing.com/rss/news_301.rss",
-    "coindesk":       "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "cointelegraph":  "https://cointelegraph.com/rss",
-    "reuters_world":  "https://feeds.reuters.com/reuters/worldNews",
-    "reuters_biz":    "https://feeds.reuters.com/reuters/businessNews",
+    "coindesk":        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "cointelegraph":   "https://cointelegraph.com/rss",
+    "bitcoin_magazine":"https://bitcoinmagazine.com/feed",
+    "decrypt":         "https://decrypt.co/feed",
+    "theblock":        "https://www.theblock.co/rss.xml",
+    "cryptoslate":     "https://cryptoslate.com/feed/",
 }
 
 # Palavras-chave que disparam alerta CRÍTICO imediato
@@ -229,15 +229,23 @@ Seja conciso mas completo. Máximo 400 palavras."""
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-haiku-4-5-20251001",
                     "max_tokens": 1024,
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
                 },
-                timeout=30,
+                timeout=60,
             )
+            resp.raise_for_status()
             data = resp.json()
-            return data["content"][0]["text"]
+            if "content" in data and len(data["content"]) > 0:
+                return data["content"][0]["text"]
+            else:
+                logger.error(f"Resposta inesperada da API: {data}")
+                return "❌ Resposta inválida da IA. Tente novamente."
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Erro HTTP na API Claude: {e.response.status_code} - {e.response.text}")
+        return f"❌ Erro na API ({e.response.status_code}). Verifique a chave ANTHROPIC_API_KEY."
     except Exception as e:
         logger.error(f"Erro na API Claude: {e}")
         return f"❌ Erro ao consultar IA: {e}"
