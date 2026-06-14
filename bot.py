@@ -68,15 +68,27 @@ FEEDS_MACRO = {
     "reuters_markets":  "https://feeds.reuters.com/reuters/businessNews",
     "politico":         "https://www.politico.com/rss/politicopicks.xml",
     "ft_markets":       "https://www.ft.com/rss/home/us",
+    "reuters_world":    "https://feeds.reuters.com/Reuters/worldNews",
+    "axios":            "https://api.axios.com/feed/",
+}
+
+# ─── Fontes RSS — Fallback para posts de influentes ──────────────
+# Portais que republicam declarações de Trump, Fed, SEC, Elon, etc.
+# Usados quando o Nitter não está disponível.
+FEEDS_INFLUENCERS_FALLBACK = {
+    "trump_truthsocial": "https://trumpstruth.org/feed",           # Agrega Truth Social do Trump
+    "whitehouse_news":   "https://www.whitehouse.gov/feed/",       # Comunicados oficiais da Casa Branca
+    "fed_press":         "https://www.federalreserve.gov/feeds/press_all.xml",  # Comunicados oficiais do Fed
+    "sec_news":          "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&dateb=&owner=include&count=10&search_text=&output=atom",  # SEC
 }
 
 # ─── Contas Twitter via Nitter RSS ───────────────────────────────
-# Nitter é um espelho open-source do Twitter que expõe RSS público.
-# Usamos múltiplas instâncias como fallback pois podem sair do ar.
+# nitter.net é a instância oficial e mais estável em 2026.
+# As demais instâncias públicas estão majoritariamente fora do ar.
 NITTER_INSTANCES = [
-    "https://nitter.poast.org",
-    "https://nitter.privacydev.net",
-    "https://nitter.1d4.us",
+    "https://nitter.net",           # Primário — instância oficial, mais estável
+    "https://nitter.poast.org",     # Fallback 1
+    "https://nitter.privacydev.net", # Fallback 2
 ]
 
 TWITTER_ACCOUNTS = {
@@ -254,17 +266,40 @@ async def fetch_nitter_account(handle: str, username: str,
     return []
 
 
+async def fetch_influencer_fallback(client: httpx.AsyncClient) -> list[dict]:
+    """
+    Fallback para quando o Nitter está offline.
+    Busca RSS de fontes oficiais (Casa Branca, Fed, SEC) e agregadores
+    que republicam declarações de Trump, Elon e outros influentes.
+    """
+    items = []
+    for name, url in FEEDS_INFLUENCERS_FALLBACK.items():
+        try:
+            raw = await fetch_rss(url, client, "influencer")
+            for item in raw:
+                item["fallback_source"] = name
+            items.extend(raw)
+            if raw:
+                logger.info(f"Fallback influencer '{name}': {len(raw)} itens")
+        except Exception as e:
+            logger.warning(f"Fallback '{name}' falhou: {e}")
+    return items
+
+
 async def fetch_all_news() -> list[dict]:
-    """Busca notícias crypto + macro + tweets. Retorna lista unificada."""
-    all_items = []
-    headers = {"User-Agent": "CryptoMacroBot/3.0"}
+    """
+    Busca notícias crypto + macro + tweets. Retorna lista unificada.
+    Estratégia de tweets:
+      1. Tenta Nitter (nitter.net como primário + fallbacks)
+      2. Se todos falharem, usa feeds oficiais/agregadores como fallback
+    """
+    all_items  = []
+    tweet_count = 0
+    headers    = {"User-Agent": "CryptoMacroBot/3.0"}
 
     async with httpx.AsyncClient(headers=headers) as client:
-        # Notícias crypto
-        crypto_tasks = [fetch_rss(url, client, "news") for url in FEEDS_CRYPTO.values()]
-        # Notícias macro
+        crypto_tasks = [fetch_rss(url, client, "news")  for url in FEEDS_CRYPTO.values()]
         macro_tasks  = [fetch_rss(url, client, "macro") for url in FEEDS_MACRO.values()]
-        # Tweets
         tweet_tasks  = [
             fetch_nitter_account(handle, username, client)
             for handle, username in TWITTER_ACCOUNTS.items()
@@ -274,11 +309,24 @@ async def fetch_all_news() -> list[dict]:
             *crypto_tasks, *macro_tasks, *tweet_tasks,
             return_exceptions=True
         )
+
         for items in results:
             if isinstance(items, list):
                 all_items.extend(items)
+                if items and items[0].get("source_type") == "tweet":
+                    tweet_count += len(items)
 
-    logger.info(f"Total de itens coletados: {len(all_items)}")
+        # Nenhum tweet veio do Nitter → ativa fallback oficial
+        if tweet_count == 0:
+            logger.warning("⚠️ Nitter indisponível — ativando fallback de influencers...")
+            fallback_items = await fetch_influencer_fallback(client)
+            all_items.extend(fallback_items)
+            if fallback_items:
+                logger.info(f"✅ Fallback: {len(fallback_items)} itens de fontes oficiais")
+            else:
+                logger.warning("❌ Fallback também falhou — sem dados de influencers neste ciclo")
+
+    logger.info(f"Total de itens coletados: {len(all_items)} (tweets Nitter: {tweet_count})")
     return all_items
 
 
