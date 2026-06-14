@@ -1,13 +1,6 @@
-"""
-╔══════════════════════════════════════════════════════╗
-║         CRYPTO MACRO RADAR - Bot Telegram            ║
-║   Monitoramento macro para traders BTC/ETH/Alts      ║
-╚══════════════════════════════════════════════════════╝
-
-Autor: Gerado por Claude (Anthropic)
-Versão: 4.0 — Confluência de Timeframes + Top 50 Scanner
-"""
-
+# CRYPTO MACRO RADAR - Bot Telegram v4.0
+# Monitoramento macro para traders BTC/ETH/Alts
+# Versao: 4.0 - Confluencia de Timeframes + Top 50 Scanner
 import asyncio
 import logging
 import os
