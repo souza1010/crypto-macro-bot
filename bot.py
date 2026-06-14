@@ -1550,3 +1550,47 @@ async def check_realtime_opportunities(bot: Bot):
 
     except Exception as e:
         logger.error(f"Erro no check de oportunidades: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  INICIALIZAÇÃO
+# ═══════════════════════════════════════════════════════════════════
+
+def main():
+    if not TELEGRAM_TOKEN:
+        raise ValueError("❌ TELEGRAM_TOKEN não configurado!")
+    if not CHAT_ID:
+        raise ValueError("❌ TELEGRAM_CHAT_ID não configurado!")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("status",  cmd_status))
+    app.add_handler(CommandHandler("resumo",  cmd_resumo))
+    app.add_handler(CommandHandler("rsi",     cmd_rsi))
+    app.add_handler(CommandHandler("scanner", cmd_scanner))
+    app.add_handler(CommandHandler("ajuda",   cmd_ajuda))
+
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(send_daily_summary,          "cron",     hour=DAILY_REPORT_HOUR,
+                      minute=DAILY_REPORT_MINUTE,  args=[app.bot])
+    scheduler.add_job(send_morning_scanner,         "cron",     hour=9, minute=5, args=[app.bot])
+    scheduler.add_job(check_critical_news,          "interval", minutes=CHECK_INTERVAL_MINUTES, args=[app.bot])
+    scheduler.add_job(check_realtime_opportunities, "interval", minutes=60, args=[app.bot])
+    scheduler.add_job(check_rsi_alerts,             "interval", minutes=30, args=[app.bot])
+    scheduler.add_job(check_fomc_alert,             "interval", minutes=5,  args=[app.bot])
+    scheduler.start()
+
+    logger.info("✅ Crypto Macro Radar v4.0 iniciado!")
+    logger.info(f"📅 Resumo diário às {DAILY_REPORT_HOUR:02d}:{DAILY_REPORT_MINUTE:02d}")
+    logger.info("📋 Scanner Top 50 às 09:05 + alertas em tempo real a cada 1h")
+    logger.info(f"🔍 Scan + filtro IA a cada {CHECK_INTERVAL_MINUTES} minutos")
+    logger.info("🐦 Monitorando: Trump, Elon, WhiteHouse, Fed, SEC, Saylor, Cathie Wood")
+    logger.info("🔔 Alertas RSI a cada 30 minutos")
+    logger.info("⚠️ Checagem FOMC a cada 5 minutos")
+
+    app.run_polling(allowed_updates=["message"])
+
+
+if __name__ == "__main__":
+    main()
