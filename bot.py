@@ -145,7 +145,7 @@ async def fetch_rss(url: str, client: httpx.AsyncClient, source_type: str = "new
         return []
 
 
-MAX_TWEET_AGE_HOURS = 6  # Dados mais antigos que isso são descartados
+MAX_TWEET_AGE_HOURS = 720  # 30 dias — só descarta instância se dados estiverem completamente congelados
 
 
 def _parse_pubdate(pub: str) -> datetime | None:
@@ -255,7 +255,9 @@ async def fetch_nitter_account(handle: str, username: str,
                 )
                 continue
 
-            logger.info(f"✅ {handle} via {instance}: {len(items)} tweets frescos (≤{MAX_TWEET_AGE_HOURS}h)")
+            age_dt2 = _parse_pubdate(most_recent_pub)
+            age_h2 = round((datetime.now(age_dt2.tzinfo) - age_dt2).total_seconds() / 3600, 1) if age_dt2 else "?"
+            logger.info(f"✅ {handle} via {instance}: {len(items)} posts (último há {age_h2}h)")
             return items[:5]
 
         except Exception as e:
