@@ -5,7 +5,7 @@
 ╚══════════════════════════════════════════════════════╝
 
 Autor: Gerado por Claude (Anthropic)
-Versão: 3.0 — Filtro IA + Tweets traduzidos + Novas fontes
+Versão: 4.0 — Confluência de Timeframes + Top 50 Scanner
 """
 
 import asyncio
@@ -26,7 +26,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CHAT_ID           = os.environ.get("TELEGRAM_CHAT_ID", "")
 TIMEZONE          = ZoneInfo("America/Sao_Paulo")
 
-DAILY_REPORT_HOUR      = 8
+DAILY_REPORT_HOUR      = 9
 DAILY_REPORT_MINUTE    = 0
 CHECK_INTERVAL_MINUTES = 15
 
@@ -1022,18 +1022,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fomc    = get_next_fomc()
     fomc_line = f"📅 Próx. FOMC: {fomc['date']} às {fomc['time']} ({fomc['days_left']} dias)\n" if fomc else ""
     await update.message.reply_text(
-        f"🚀 *Crypto Macro Radar v3.0 ativo!*\n\n"
+        f"🚀 *Crypto Macro Radar v4.0 ativo!*\n\n"
         f"Seu Chat ID: `{chat_id}`\n\n"
         f"*Comandos:*\n"
         f"/status — Painel completo de mercado\n"
         f"/resumo — Briefing macro com IA\n"
-        f"/rsi — Verificar RSI das moedas agora\n"
+        f"/scanner — Scanner Top 50 agora\n"
+        f"/rsi — RSI das moedas monitoradas\n"
         f"/ajuda — Lista completa\n\n"
         f"*Automático:*\n"
-        f"📅 Resumo diário: 08h00 (Brasília)\n"
+        f"📅 Resumo macro: 09h00 (Brasília)\n"
+        f"📋 Scanner Top 50: 09h05 (Brasília)\n"
         f"🚨 Alertas filtrados por IA: a cada 15 min\n"
+        f"🔔 Oportunidades em tempo real: a cada 1h\n"
         f"🐦 Tweets de Trump, Elon e outros: monitorados\n"
-        f"🔔 Alertas RSI: a cada 30 min\n"
         f"⚠️ Alerta FOMC: 1h antes\n\n"
         f"{fomc_line}",
         parse_mode=ParseMode.MARKDOWN,
@@ -1056,27 +1058,52 @@ async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 Calculando RSI...", parse_mode=ParseMode.MARKDOWN)
+    """Mostra RSI via Binance (1h, 4h, 1d) para moedas monitoradas."""
+    await update.message.reply_text("📊 Calculando RSI via Binance...", parse_mode=ParseMode.MARKDOWN)
     prices = await fetch_prices()
-    lines  = ["📊 *RSI — MOEDAS MONITORADAS*\n" + "─"*30]
+
+    def rsi_label(v):
+        if v is None: return "N/A"
+        if v < 20:  return f"`{v}` 🔴 _Extremo SV_"
+        if v < 30:  return f"`{v}` 🟠 _SV_"
+        if v > 80:  return f"`{v}` 🟡 _Extremo SC_"
+        if v > 70:  return f"`{v}` 🟡 _SC_"
+        return f"`{v}` ⚪"
+
+    lines = ["📊 *RSI — MOEDAS MONITORADAS (Binance)*\n" + "─"*30]
     for coin_id, symbol in CRYPTO_WATCH.items():
-        rsi   = await fetch_rsi(coin_id)
-        price = prices.get(coin_id, {}).get("usd", 0)
-        rsi_1h = rsi.get("1h", "N/A")
-        rsi_4h = rsi.get("4h", "N/A")
-
-        def rsi_label(v):
-            if v == "N/A": return "N/A"
-            if v < 30:  return f"`{v}` 🔴 _SV_"
-            if v > 70:  return f"`{v}` 🟡 _SC_"
-            return f"`{v}` ⚪"
-
+        price  = prices.get(coin_id, {}).get("usd", 0)
+        bsymbol = COINGECKO_TO_BINANCE.get(coin_id)
+        if bsymbol:
+            rsi_1h = await fetch_binance_rsi(bsymbol, "1h")
+            rsi_4h = await fetch_binance_rsi(bsymbol, "4h")
+            rsi_1d = await fetch_binance_rsi(bsymbol, "1d")
+        else:
+            rsi_data = await fetch_rsi(coin_id)
+            rsi_1h = rsi_data.get("1h")
+            rsi_4h = rsi_data.get("4h")
+            rsi_1d = None
         lines.append(
             f"*{symbol}* — `${price:,.4f}`\n"
-            f"  ⏱ 1h: {rsi_label(rsi_1h)}  |  4h: {rsi_label(rsi_4h)}\n"
+            f"  1h: {rsi_label(rsi_1h)} | 4h: {rsi_label(rsi_4h)} | 1d: {rsi_label(rsi_1d)}\n"
         )
-    lines.append("─"*30 + "\n_SV = Sobrevendido | SC = Sobrecomprado_")
+        await asyncio.sleep(0.5)
+
+    lines.append("─"*30 + "\n_SV = Sobrevendido | SC = Sobrecomprado_\n_< 20 = Extremamente sobrevendido_")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+
+async def cmd_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /scanner — roda o Top 50 scanner manualmente."""
+    await update.message.reply_text(
+        "🔍 Rodando scanner Top 50...\n_Isso pode levar até 2 minutos_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    now          = datetime.now(TIMEZONE)
+    opportunities = await scan_top50_opportunities()
+    msg          = format_opportunity_list(opportunities, now)
+    await update.message.reply_text(msg[:4096], parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1117,22 +1144,32 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("resumo", cmd_resumo))
-    app.add_handler(CommandHandler("rsi",    cmd_rsi))
-    app.add_handler(CommandHandler("ajuda",  cmd_ajuda))
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("status",  cmd_status))
+    app.add_handler(CommandHandler("resumo",  cmd_resumo))
+    app.add_handler(CommandHandler("rsi",     cmd_rsi))
+    app.add_handler(CommandHandler("scanner", cmd_scanner))
+    app.add_handler(CommandHandler("ajuda",   cmd_ajuda))
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    scheduler.add_job(send_daily_summary,  "cron",     hour=DAILY_REPORT_HOUR,
+    # Resumo macro diário às 09h
+    scheduler.add_job(send_daily_summary,         "cron",     hour=DAILY_REPORT_HOUR,
                       minute=DAILY_REPORT_MINUTE, args=[app.bot])
-    scheduler.add_job(check_critical_news, "interval", minutes=CHECK_INTERVAL_MINUTES, args=[app.bot])
-    scheduler.add_job(check_rsi_alerts,    "interval", minutes=30,  args=[app.bot])
-    scheduler.add_job(check_fomc_alert,    "interval", minutes=5,   args=[app.bot])
+    # Scanner matinal Top 50 às 09h05 (após resumo)
+    scheduler.add_job(send_morning_scanner,        "cron",     hour=9, minute=5, args=[app.bot])
+    # Notícias e tweets críticos a cada 15 min
+    scheduler.add_job(check_critical_news,         "interval", minutes=CHECK_INTERVAL_MINUTES, args=[app.bot])
+    # Oportunidades em tempo real a cada 1h
+    scheduler.add_job(check_realtime_opportunities,"interval", minutes=60, args=[app.bot])
+    # Alertas RSI lista base a cada 30 min
+    scheduler.add_job(check_rsi_alerts,            "interval", minutes=30, args=[app.bot])
+    # Checagem FOMC a cada 5 min
+    scheduler.add_job(check_fomc_alert,            "interval", minutes=5,  args=[app.bot])
     scheduler.start()
 
-    logger.info("✅ Crypto Macro Radar v3.0 iniciado!")
+    logger.info("✅ Crypto Macro Radar v4.0 iniciado!")
     logger.info(f"📅 Resumo diário às {DAILY_REPORT_HOUR:02d}:{DAILY_REPORT_MINUTE:02d}")
+    logger.info("📋 Scanner Top 50 às 09:05 + alertas em tempo real a cada 1h")
     logger.info(f"🔍 Scan + filtro IA a cada {CHECK_INTERVAL_MINUTES} minutos")
     logger.info("🐦 Monitorando: Trump, Elon, WhiteHouse, Fed, SEC, Saylor, Cathie Wood")
     logger.info("🔔 Alertas RSI a cada 30 minutos")
@@ -1143,3 +1180,373 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ═══════════════════════════════════════════════════════════════════
+#  TOP 50 SCANNER — CONFLUÊNCIA DE TIMEFRAMES
+# ═══════════════════════════════════════════════════════════════════
+
+# Cache global do Top 50
+_top50_cache: list[dict] = []
+_top50_cache_time: datetime | None = None
+
+
+async def fetch_top50() -> list[dict]:
+    """
+    Busca top 50 moedas por market cap da CoinGecko.
+    Cacheia por 6h para não sobrecarregar a API.
+    Retorna lista com id, symbol, preço e variações.
+    """
+    global _top50_cache, _top50_cache_time
+    now = datetime.now(TIMEZONE)
+
+    # Usa cache se tiver menos de 6h
+    if _top50_cache and _top50_cache_time:
+        age_h = (now - _top50_cache_time).total_seconds() / 3600
+        if age_h < 6:
+            logger.info(f"Top 50 via cache ({age_h:.1f}h atrás)")
+            return _top50_cache
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency":           "usd",
+                    "order":                 "market_cap_desc",
+                    "per_page":              50,
+                    "page":                  1,
+                    "price_change_percentage": "1h,24h,7d,30d",
+                    "sparkline":             False,
+                },
+                timeout=15,
+            )
+            data = resp.json()
+            _top50_cache      = data
+            _top50_cache_time = now
+            logger.info(f"Top 50 atualizado: {len(data)} moedas")
+            return data
+    except Exception as e:
+        logger.warning(f"Erro ao buscar top 50: {e}")
+        return _top50_cache  # Retorna cache antigo em caso de erro
+
+
+def calc_rsi_from_closes(closes: list[float], period: int = 14) -> float | None:
+    """Calcula RSI a partir de uma lista de closes."""
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
+
+# Mapeamento CoinGecko ID → símbolo Binance
+COINGECKO_TO_BINANCE = {
+    "bitcoin":        "BTCUSDT",
+    "ethereum":       "ETHUSDT",
+    "tether":         "USDTUSD",
+    "binancecoin":    "BNBUSDT",
+    "solana":         "SOLUSDT",
+    "ripple":         "XRPUSDT",
+    "usd-coin":       "USDCUSDT",
+    "dogecoin":       "DOGEUSDT",
+    "cardano":        "ADAUSDT",
+    "avalanche-2":    "AVAXUSDT",
+    "shiba-inu":      "SHIBUSDT",
+    "polkadot":       "DOTUSDT",
+    "chainlink":      "LINKUSDT",
+    "bitcoin-cash":   "BCHUSDT",
+    "near":           "NEARUSDT",
+    "litecoin":       "LTCUSDT",
+    "uniswap":        "UNIUSDT",
+    "internet-computer": "ICPUSDT",
+    "aptos":          "APTUSDT",
+    "stellar":        "XLMUSDT",
+    "ethereum-classic": "ETCUSDT",
+    "filecoin":       "FILUSDT",
+    "hedera-hashgraph": "HBARUSDT",
+    "arbitrum":       "ARBUSDT",
+    "vechain":        "VETUSDT",
+    "the-graph":      "GRTUSDT",
+    "injective-protocol": "INJUSDT",
+    "sei-network":    "SEIUSDT",
+    "optimism":       "OPUSDT",
+    "render-token":   "RENDERUSDT",
+    "sui":            "SUIUSDT",
+    "pepe":           "PEPEUSDT",
+    "maker":          "MKRUSDT",
+    "aave":           "AAVEUSDT",
+    "fantom":         "FTMUSDT",
+    "the-sandbox":    "SANDUSDT",
+    "decentraland":   "MANAUSDT",
+    "axie-infinity":  "AXSUSDT",
+    "matic-network":  "MATICUSDT",
+    "atom":           "ATOMUSDT",
+    "algorand":       "ALGOUSDT",
+    "tron":           "TRXUSDT",
+    "theta-token":    "THETAUSDT",
+    "flow":           "FLOWUSDT",
+    "gala":           "GALAUSDT",
+    "floki":          "FLOKIUSDT",
+    "worldcoin-wld":  "WLDUSDT",
+    "blur":           "BLURUSDT",
+    "woo-network":    "WOOUSDT",
+}
+
+BINANCE_INTERVAL_MAP = {
+    "1d": ("1d",  30),   # timeframe, número de candles
+    "4h": ("4h",  60),
+    "1h": ("1h",  100),
+    "1w": ("1w",  20),
+}
+
+async def fetch_binance_rsi(symbol: str, timeframe: str = "1d") -> float | None:
+    """
+    Busca OHLC da Binance e calcula RSI.
+    Muito mais preciso que CoinGecko — dados reais de exchange.
+    """
+    interval, limit = BINANCE_INTERVAL_MAP.get(timeframe, ("1d", 30))
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol":   symbol,
+                    "interval": interval,
+                    "limit":    limit,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            candles = resp.json()
+            if not candles or len(candles) < 15:
+                return None
+            closes = [float(c[4]) for c in candles]
+            return calc_rsi_from_closes(closes)
+    except Exception as e:
+        logger.debug(f"Binance RSI erro {symbol} {timeframe}: {e}")
+        return None
+
+
+async def fetch_ohlc_rsi(coin_id: str, days: int) -> float | None:
+    """
+    Wrapper de compatibilidade — tenta Binance primeiro, fallback CoinGecko.
+    days=30 → timeframe 1d | days=7 → timeframe 4h
+    """
+    symbol = COINGECKO_TO_BINANCE.get(coin_id)
+    timeframe = "1d" if days >= 14 else "4h"
+
+    if symbol:
+        rsi = await fetch_binance_rsi(symbol, timeframe)
+        if rsi is not None:
+            return rsi
+
+    # Fallback CoinGecko
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
+                params={"vs_currency": "usd", "days": days},
+                timeout=15,
+            )
+            candles = resp.json()
+            if not candles or len(candles) < 15:
+                return None
+            closes = [c[4] for c in candles]
+            return calc_rsi_from_closes(closes)
+    except Exception:
+        return None
+
+
+def is_uptrend(coin: dict) -> tuple[bool, str]:
+    """
+    Verifica tendência de alta via variações de preço nos timeframes.
+    Retorna (is_uptrend, descrição).
+    Lógica top-down:
+      - 30d positivo = tendência macro de alta
+      - 7d negativo  = correção saudável em andamento
+    """
+    change_30d = coin.get("price_change_percentage_30d_in_currency", None)
+    change_7d  = coin.get("price_change_percentage_7d_in_currency",  None)
+    change_24h = coin.get("price_change_percentage_24h_in_currency", None)
+
+    if change_30d is None or change_7d is None:
+        return False, "Dados insuficientes"
+
+    # Tendência macro de alta: 30d positivo
+    if change_30d <= 0:
+        return False, f"30d negativo ({change_30d:+.1f}%)"
+
+    # Correção no médio prazo: 7d negativo (pullback)
+    if change_7d >= 0:
+        return False, f"Sem correção (7d: {change_7d:+.1f}%)"
+
+    desc = f"30d: {change_30d:+.1f}% | 7d: {change_7d:+.1f}% | 24h: {change_24h:+.1f}%"
+    return True, desc
+
+
+async def scan_top50_opportunities() -> list[dict]:
+    """
+    ETAPA 1 — Filtro rápido: moedas em tendência de alta com correção
+    ETAPA 2 — Análise profunda: RSI 1d sobrevendido nas filtradas
+    Retorna lista de oportunidades ordenadas por força do sinal.
+    """
+    logger.info("🔍 Iniciando scan Top 50...")
+    coins = await fetch_top50()
+    if not coins:
+        return []
+
+    # ETAPA 1 — Filtro de tendência (rápido, sem chamadas extras)
+    candidates = []
+    for coin in coins:
+        uptrend, trend_desc = is_uptrend(coin)
+        if uptrend:
+            candidates.append({
+                "id":         coin["id"],
+                "symbol":     coin["symbol"].upper(),
+                "name":       coin["name"],
+                "price":      coin["current_price"],
+                "change_24h": coin.get("price_change_percentage_24h_in_currency", 0),
+                "change_7d":  coin.get("price_change_percentage_7d_in_currency",  0),
+                "change_30d": coin.get("price_change_percentage_30d_in_currency", 0),
+                "trend_desc": trend_desc,
+            })
+
+    logger.info(f"Etapa 1: {len(candidates)}/{len(coins)} moedas em tendência de alta")
+
+    if not candidates:
+        return []
+
+    # ETAPA 2 — RSI 1d nas candidatas (chamadas individuais, mas poucas)
+    opportunities = []
+    for coin in candidates:
+        await asyncio.sleep(1.5)  # Respeita rate limit da CoinGecko
+        rsi_1d = await fetch_ohlc_rsi(coin["id"], days=30)   # 1d candles
+        rsi_4h = await fetch_ohlc_rsi(coin["id"], days=7)    # 4h candles
+
+        if rsi_1d is None:
+            continue
+
+        coin["rsi_1d"] = rsi_1d
+        coin["rsi_4h"] = rsi_4h
+
+        # Classifica força do sinal
+        if rsi_1d < 20:
+            if rsi_4h and rsi_4h < 30:
+                coin["signal_strength"] = "🔴 FORTE"
+                coin["signal_score"]    = 3
+            else:
+                coin["signal_strength"] = "🟠 MÉDIO"
+                coin["signal_score"]    = 2
+            opportunities.append(coin)
+            logger.info(f"✅ Oportunidade: {coin['symbol']} RSI1d={rsi_1d} RSI4h={rsi_4h}")
+        elif rsi_1d < 30:
+            coin["signal_strength"] = "🟡 FRACO"
+            coin["signal_score"]    = 1
+            opportunities.append(coin)
+
+    # Ordena por força do sinal
+    opportunities.sort(key=lambda x: x["signal_score"], reverse=True)
+    logger.info(f"Scan concluído: {len(opportunities)} oportunidades encontradas")
+    return opportunities
+
+
+def format_opportunity_list(opportunities: list[dict], now: datetime) -> str:
+    """Formata a lista matinal de oportunidades para o Telegram."""
+    if not opportunities:
+        return (
+            f"📋 *SCANNER TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*\n"
+            f"{'─'*30}\n"
+            f"Nenhuma moeda em setup de fundo ascendente no momento.\n"
+            f"_Tendência de alta + RSI sobrevendido = sem confluência agora._"
+        )
+
+    lines = [
+        f"📋 *SCANNER TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*",
+        f"_Tendência 30d alta + correção 7d + RSI 1d < 30 (🔴 < 20)_",
+        f"{'─'*30}",
+    ]
+
+    for i, coin in enumerate(opportunities[:10], 1):
+        rsi_4h_str = f" | RSI 4h: `{coin['rsi_4h']}`" if coin.get("rsi_4h") else ""
+        lines.append(
+            f"{i}. {coin['signal_strength']} *{coin['symbol']}* — `${coin['price']:,.4f}`\n"
+            f"   📈 30d: `{coin['change_30d']:+.1f}%` | 7d: `{coin['change_7d']:+.1f}%`\n"
+            f"   ⚡ RSI 1d: `{coin['rsi_1d']}`{rsi_4h_str}\n"
+        )
+
+    lines.append("─"*30)
+    lines.append("⚠️ _Não é recomendação de investimento. Confirme no gráfico!_")
+    return "\n".join(lines)
+
+
+async def send_morning_scanner(bot: Bot):
+    """Envia lista matinal de oportunidades às 09h."""
+    logger.info("📋 Gerando scanner matinal Top 50...")
+    now = datetime.now(TIMEZONE)
+    try:
+        opportunities = await scan_top50_opportunities()
+        msg = format_opportunity_list(opportunities, now)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=msg[:4096],
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info(f"Scanner matinal enviado: {len(opportunities)} oportunidades")
+    except Exception as e:
+        logger.error(f"Erro no scanner matinal: {e}")
+
+
+async def check_realtime_opportunities(bot: Bot):
+    """
+    Roda a cada 1h — filtro leve nas top 50.
+    Dispara alerta apenas para sinais FORTES (RSI 1d < 30 + RSI 4h < 40).
+    Evita reenviar o mesmo setup pelo cache.
+    """
+    logger.info("🔔 Verificando oportunidades em tempo real...")
+    try:
+        opportunities = await scan_top50_opportunities()
+        # Só alerta FORTE: RSI 1d < 20 + RSI 4h < 30
+        strong = [o for o in opportunities if o["signal_score"] == 3]
+
+        for coin in strong:
+            cache_key = f"opportunity_{coin['id']}_{int(coin['rsi_1d'])}"
+            if cache_key in sent_news_cache:
+                continue
+            sent_news_cache.add(cache_key)
+
+            now = datetime.now(TIMEZONE)
+            msg = (
+                f"🚨 *SETUP DETECTADO — {coin['symbol']}*\n"
+                f"{'─'*30}\n"
+                f"📈 *Tendência macro de alta + Fundo se formando*\n"
+                f"{'─'*30}\n"
+                f"💰 *Preço:* `${coin['price']:,.4f}`\n"
+                f"📊 *30d:* `{coin['change_30d']:+.1f}%` _(tendência de alta)_\n"
+                f"📉 *7d:* `{coin['change_7d']:+.1f}%` _(correção)_\n"
+                f"📉 *24h:* `{coin['change_24h']:+.1f}%`\n"
+                f"⚡ *RSI 1d:* `{coin['rsi_1d']}` _(sobrevendido)_\n"
+                f"⚡ *RSI 4h:* `{coin.get('rsi_4h', 'N/A')}` _(sobrevendido)_\n"
+                f"{'─'*30}\n"
+                f"🎯 *Confluência de timeframes detectada*\n"
+                f"_Verifique o gráfico para confirmar o fundo ascendente_\n\n"
+                f"🕐 _{now.strftime('%d/%m/%Y %H:%M')} (Brasília)_\n"
+                f"⚠️ _Não é recomendação de investimento_"
+            )
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=msg[:4096],
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            logger.info(f"Alerta de oportunidade enviado: {coin['symbol']}")
+            await asyncio.sleep(3)
+
+    except Exception as e:
+        logger.error(f"Erro no check de oportunidades: {e}")
