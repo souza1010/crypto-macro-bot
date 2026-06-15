@@ -261,189 +261,195 @@ async def fetch_top50():
         return _top50_cache
 
 
-async def analyze_coin_multiframe(symbol_usdt):
+async def analyze_coin_full(symbol_usdt):
     """
-    Analise completa multi-timeframe de uma moeda.
-
-    FILTRO 1 - Tendencia de alta macro (MM20 > MM50):
-      - 1 semana (1w)
-      - 1 dia   (1d)
-      - 4 horas (4h)
-
-    FILTRO 2 - RSI sobrevendido no curto prazo:
-      - 1 hora  (1h) RSI < 30 OBRIGATORIO
-      - 15 min  (15m) RSI < 30
-      - 5 min   (5m)  RSI < 30
-      Regra: 1h obrigatorio + pelo menos 1 dos outros 2
-
-    FILTRO 3 - Forca relativa contra BTC:
-      - Par MOEDA/BTC em tendencia de alta (MM20 > MM50 no 1d)
-
-    Retorna dict com resultado ou None se nao passou nos filtros.
+    Analise completa de uma moeda — igual ao TradingView:
+    Calcula tendencia (MM20 > MM50) e RSI para cada timeframe.
+    Retorna tabela com USDT e BTC para: 5m, 15m, 1h, 4h, 1d, 1w
     """
-    result = {
-        "symbol": symbol_usdt,
-        "trend_1w": None, "trend_1d": None, "trend_4h": None,
-        "rsi_1h": None, "rsi_15m": None, "rsi_5m": None,
-        "btc_pair_uptrend": None,
-        "passed": False,
-        "signal_score": 0,
-    }
+    timeframes = ["5m", "15m", "1h", "4h", "1d", "1w"]
+    symbol_btc = to_kucoin_symbol(symbol_usdt).replace("-USDT", "-BTC")
 
-    # FILTRO 1 - Tendencia macro (busca em paralelo)
-    trend_1w, trend_1d, trend_4h = await asyncio.gather(
-        fetch_binance_trend(symbol_usdt, "1w", 50),
-        fetch_binance_trend(symbol_usdt, "1d", 50),
-        fetch_binance_trend(symbol_usdt, "4h", 50),
+    result = {"usdt": {}, "btc": {}}
+
+    for tf in timeframes:
+        await asyncio.sleep(0.2)
+        # Par USDT
+        trend_usdt = await fetch_binance_trend(symbol_usdt, tf, 60)
+        rsi_usdt   = await fetch_binance_rsi(symbol_usdt, tf, 60)
+        result["usdt"][tf] = {"trend": trend_usdt, "rsi": rsi_usdt}
+
+        # Par BTC
+        trend_btc = await fetch_binance_trend(symbol_btc, tf, 60)
+        rsi_btc   = await fetch_binance_rsi(symbol_btc, tf, 60)
+        result["btc"][tf] = {"trend": trend_btc, "rsi": rsi_btc}
+
+    return result
+
+
+def check_setup(analysis):
+    """
+    Verifica se a moeda esta em setup de entrada:
+    OBRIGATORIO:
+      - 1w + 1d + 4h em tendencia de alta no par USDT
+      - 1h SV (RSI < 30) + pelo menos 1 entre 5m ou 15m SV
+    BONUS:
+      - Par BTC tambem em tendencia de alta nos TFs macro
+    """
+    usdt = analysis["usdt"]
+
+    # Tendencia macro em alta
+    macro_ok = (
+        usdt.get("1w", {}).get("trend") == True and
+        usdt.get("1d", {}).get("trend") == True and
+        usdt.get("4h", {}).get("trend") == True
     )
-    result["trend_1w"] = trend_1w
-    result["trend_1d"] = trend_1d
-    result["trend_4h"] = trend_4h
+    if not macro_ok:
+        return False, 0
 
-    # Todos os 3 timeframes macro devem estar em alta
-    if not (trend_1w and trend_1d and trend_4h):
-        return result
+    # RSI curto prazo sobrevendido
+    rsi_1h  = usdt.get("1h",  {}).get("rsi")
+    rsi_15m = usdt.get("15m", {}).get("rsi")
+    rsi_5m  = usdt.get("5m",  {}).get("rsi")
 
-    # FILTRO 2 - RSI curto prazo (busca em paralelo)
-    rsi_1h, rsi_15m, rsi_5m = await asyncio.gather(
-        fetch_binance_rsi(symbol_usdt, "1h", 100),
-        fetch_binance_rsi(symbol_usdt, "15m", 100),
-        fetch_binance_rsi(symbol_usdt, "5m", 100),
-    )
-    result["rsi_1h"]  = rsi_1h
-    result["rsi_15m"] = rsi_15m
-    result["rsi_5m"]  = rsi_5m
-
-    # 1h obrigatorio em SV + pelo menos 1 dos outros 2
     if rsi_1h is None or rsi_1h >= 30:
-        return result
+        return False, 0
 
-    short_sv_count = sum([
+    short_sv = sum([
         1 if (rsi_15m and rsi_15m < 30) else 0,
-        1 if (rsi_5m and rsi_5m < 30) else 0,
+        1 if (rsi_5m  and rsi_5m  < 30) else 0,
     ])
-    if short_sv_count < 1:
-        return result
-
-    # FILTRO 3 - Forca relativa contra BTC
-    btc_uptrend = await fetch_binance_pair_trend(symbol_usdt, "1d", 50)
-    result["btc_pair_uptrend"] = btc_uptrend
+    if short_sv < 1:
+        return False, 0
 
     # Calcula score
-    score = 3  # Base: passou todos os filtros obrigatorios
-    if rsi_15m and rsi_15m < 30:
-        score += 1
-    if rsi_5m and rsi_5m < 30:
-        score += 1
-    if btc_uptrend:
-        score += 2  # Bonus grande: mais forte que BTC
-    if rsi_1h < 20:
-        score += 1  # Bonus: RSI extremo
+    score = 3
+    if rsi_1h < 20:   score += 1
+    if rsi_15m and rsi_15m < 20: score += 1
+    if rsi_5m  and rsi_5m  < 20: score += 1
 
-    result["passed"]       = True
-    result["signal_score"] = score
-    return result
+    # Bonus BTC — par BTC tambem em alta nos TFs macro
+    btc = analysis["btc"]
+    btc_macro = sum([
+        1 if btc.get("1w", {}).get("trend") else 0,
+        1 if btc.get("1d", {}).get("trend") else 0,
+        1 if btc.get("4h", {}).get("trend") else 0,
+    ])
+    score += btc_macro  # 0-3 bonus
+
+    return True, score
+
+
+def format_coin_table(symbol, price, analysis):
+    """
+    Formata tabela estilo TradingView para o Telegram.
+    Mostra tendencia e RSI de cada timeframe para USDT e BTC.
+    """
+    def trend_emoji(t):
+        if t is True:  return "🟢Alta"
+        if t is False: return "🔴Baixa"
+        return "⚪N/A"
+
+    def rsi_str(r):
+        if r is None: return "N/A"
+        if r < 20: return f"{r}🔴"
+        if r < 30: return f"{r}🟠"
+        if r > 70: return f"{r}🟡"
+        return str(r)
+
+    usdt = analysis["usdt"]
+    btc  = analysis["btc"]
+    tfs  = ["5m", "15m", "1h", "4h", "1d", "1w"]
+
+    lines = [
+        f"📊 *{symbol}/USDT* — `${price:,.4f}`",
+        f"`{'TF':<4} {'USDT':<12} {'RSI':<6} {'BTC':<12} {'RSI':<6}`",
+        f"`{'─'*42}`",
+    ]
+    for tf in tfs:
+        u = usdt.get(tf, {})
+        b = btc.get(tf, {})
+        t_usdt = trend_emoji(u.get("trend"))
+        r_usdt = rsi_str(u.get("rsi"))
+        t_btc  = trend_emoji(b.get("trend"))
+        r_btc  = rsi_str(b.get("rsi"))
+        lines.append(f"`{tf:<4} {t_usdt:<12} {r_usdt:<6} {t_btc:<12} {r_btc:<6}`")
+
+    return "\n".join(lines)
 
 
 async def scan_top50_opportunities():
     """
-    ETAPA 1: Filtra top 50 com dados de mercado (1 chamada rapida)
-    ETAPA 2: Analise multi-timeframe completa nas candidatas
+    Scanner Top 50 com tabela multi-timeframe estilo TradingView.
+    FILTRO: 1w+1d+4h em alta + 1h SV + (15m ou 5m SV)
+    INFO EXTRA: par BTC com tendencia em cada timeframe
     """
     logger.info("Iniciando scan Top 50 multi-timeframe...")
     coins = await fetch_top50()
     if not coins:
         return []
 
-    # ETAPA 1: Pre-filtro rapido por variacao de preco
-    # 30d positivo = tendencia macro de alta (proxy rapido)
-    candidates = []
-    for coin in coins:
-        change_30d = coin.get("price_change_percentage_30d_in_currency", 0) or 0
-        change_7d  = coin.get("price_change_percentage_7d_in_currency", 0) or 0
-        symbol = COINGECKO_TO_BINANCE.get(coin["id"])
-        if symbol and change_30d > 0:
-            candidates.append({
-                "id":         coin["id"],
-                "symbol":     coin["symbol"].upper(),
-                "name":       coin["name"],
-                "price":      coin["current_price"],
-                "change_24h": coin.get("price_change_percentage_24h_in_currency", 0) or 0,
-                "change_7d":  change_7d,
-                "change_30d": change_30d,
-                "binance":    symbol,
-            })
-
-    logger.info(f"Pre-filtro: {len(candidates)}/{len(coins)} candidatas")
-
-    # ETAPA 2: Analise multi-timeframe completa
     opportunities = []
-    for coin in candidates:
-        await asyncio.sleep(0.5)  # Rate limit Binance
-        analysis = await analyze_coin_multiframe(coin["binance"])
 
-        if not analysis["passed"]:
+    for coin in coins:
+        symbol_usdt = COINGECKO_TO_BINANCE.get(coin["id"])
+        if not symbol_usdt:
             continue
 
-        coin.update({
-            "trend_1w":        analysis["trend_1w"],
-            "trend_1d":        analysis["trend_1d"],
-            "trend_4h":        analysis["trend_4h"],
-            "rsi_1h":          analysis["rsi_1h"],
-            "rsi_15m":         analysis["rsi_15m"],
-            "rsi_5m":          analysis["rsi_5m"],
-            "btc_pair_uptrend": analysis["btc_pair_uptrend"],
-            "signal_score":    analysis["signal_score"],
+        logger.info(f"Analisando {coin['symbol'].upper()}...")
+        await asyncio.sleep(0.3)
+
+        # Analise completa — todos os timeframes, USDT e BTC
+        analysis = await analyze_coin_full(symbol_usdt)
+
+        # Verifica se esta em setup
+        passed, score = check_setup(analysis)
+        if not passed:
+            continue
+
+        change_24h = coin.get("price_change_percentage_24h_in_currency", 0) or 0
+        change_7d  = coin.get("price_change_percentage_7d_in_currency", 0) or 0
+
+        opportunities.append({
+            "id":           coin["id"],
+            "symbol":       coin["symbol"].upper(),
+            "name":         coin["name"],
+            "price":        coin["current_price"],
+            "change_24h":   change_24h,
+            "change_7d":    change_7d,
+            "analysis":     analysis,
+            "signal_score": score,
         })
-
-        # Define forca do sinal
-        score = analysis["signal_score"]
-        if score >= 7:
-            coin["signal_strength"] = "🔴 FORTE"
-        elif score >= 5:
-            coin["signal_strength"] = "🟠 MEDIO"
-        else:
-            coin["signal_strength"] = "🟡 FRACO"
-
-        opportunities.append(coin)
-        logger.info(f"Setup: {coin['symbol']} score={score} RSI1h={analysis['rsi_1h']} BTC_par={'alta' if analysis['btc_pair_uptrend'] else 'baixa'}")
+        logger.info(f"✅ Setup: {coin['symbol'].upper()} score={score}")
 
     opportunities.sort(key=lambda x: x["signal_score"], reverse=True)
-    logger.info(f"Scan concluido: {len(opportunities)} oportunidades")
+    logger.info(f"Scan concluido: {len(opportunities)} setups encontrados")
     return opportunities
 
 
 def format_opportunity_list(opportunities, now):
-    """Formata lista de oportunidades para o Telegram."""
+    """Formata lista de oportunidades estilo TradingView para o Telegram."""
     if not opportunities:
         return (
             f"📋 *SCANNER TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*\n"
             f"{'─'*30}\n"
             f"Nenhum setup encontrado no momento.\n"
-            f"_Aguardando confluencia: tendencia macro + RSI SV + forca vs BTC_"
+            f"_Aguardando: 1w+1d+4h em alta + 1h/15m/5m sobrevendido_"
         )
 
     lines = [
         f"📋 *SCANNER TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*",
-        f"_1w+1d+4h em alta | 1h+15m/5m SV | Forca vs BTC_",
+        f"_Tendencia macro + RSI SV curto prazo + par BTC_",
         f"{'─'*30}",
     ]
 
-    for i, coin in enumerate(opportunities[:10], 1):
-        trend_btc = "✅ Alta vs BTC" if coin.get("btc_pair_uptrend") else "⚠️ Fraca vs BTC"
-        rsi_15m_str = f"`{coin['rsi_15m']}`" if coin.get("rsi_15m") else "N/A"
-        rsi_5m_str  = f"`{coin['rsi_5m']}`"  if coin.get("rsi_5m")  else "N/A"
+    for i, coin in enumerate(opportunities[:5], 1):
+        lines.append(f"*{i}. {coin['symbol']}* | Score: `{coin['signal_score']}` | 24h: `{coin['change_24h']:+.1f}%`")
+        lines.append(format_coin_table(coin['symbol'], coin['price'], coin['analysis']))
+        lines.append("─"*30)
 
-        lines.append(
-            f"{i}. {coin['signal_strength']} *{coin['symbol']}* — `${coin['price']:,.4f}`\n"
-            f"   📈 Tendencia: 1w✅ 1d✅ 4h✅\n"
-            f"   ⚡ RSI: 1h:`{coin['rsi_1h']}` | 15m:{rsi_15m_str} | 5m:{rsi_5m_str}\n"
-            f"   {trend_btc} | Score: `{coin['signal_score']}`\n"
-        )
-
-    lines.append("─"*30)
-    lines.append(f"_Total: {len(opportunities)} setups | Score max: {opportunities[0]['signal_score']}_")
-    lines.append("⚠️ _Confirme no grafico antes de entrar!_")
+    lines.append(f"_Total: {len(opportunities)} setups | Confirme no grafico!_")
+    lines.append("⚠️ _Nao e recomendacao de investimento_")
     return "\n".join(lines)
 
 
@@ -469,32 +475,25 @@ async def check_realtime_opportunities(bot):
     logger.info("Verificando oportunidades em tempo real...")
     try:
         opportunities = await scan_top50_opportunities()
-        strong = [o for o in opportunities if o["signal_score"] >= 7]
+        # Alerta para score alto (setup forte)
+        strong = [o for o in opportunities if o["signal_score"] >= 5]
 
         for coin in strong:
-            cache_key = f"opp_{coin['id']}_{int(coin['rsi_1h'])}"
+            cache_key = f"opp_{coin['id']}_{coin['signal_score']}"
             if cache_key in sent_news_cache:
                 continue
             sent_news_cache.add(cache_key)
 
-            now = datetime.now(TIMEZONE)
-            trend_btc = "✅ Mais forte que BTC" if coin.get("btc_pair_uptrend") else "⚠️ Fraca vs BTC"
-            rsi_15m_str = f"`{coin['rsi_15m']}`" if coin.get("rsi_15m") else "N/A"
-            rsi_5m_str  = f"`{coin['rsi_5m']}`"  if coin.get("rsi_5m")  else "N/A"
-
+            now  = datetime.now(TIMEZONE)
+            tabela = format_coin_table(coin["symbol"], coin["price"], coin["analysis"])
             msg = (
                 f"🚨 *SETUP DETECTADO — {coin['symbol']}*\n"
                 f"{'─'*30}\n"
-                f"*Confluencia multi-timeframe confirmada*\n"
+                f"1w+1d+4h em alta + RSI SV no curto prazo\n"
+                f"Score: `{coin['signal_score']}` | 24h: `{coin['change_24h']:+.1f}%`\n"
                 f"{'─'*30}\n"
-                f"💰 *Preco:* `${coin['price']:,.4f}`\n"
-                f"📈 *Tendencia macro:* 1w ✅ | 1d ✅ | 4h ✅\n"
-                f"⚡ *RSI curto prazo:*\n"
-                f"   1h: `{coin['rsi_1h']}` _(SV obrigatorio)_\n"
-                f"   15m: {rsi_15m_str} | 5m: {rsi_5m_str}\n"
-                f"📊 *Forca relativa:* {trend_btc}\n"
-                f"⭐ *Score:* `{coin['signal_score']}/9`\n"
-                f"{'─'*30}\n"
+                + tabela +
+                f"\n{'─'*30}\n"
                 f"🎯 _Verifique o grafico para confirmar entrada_\n"
                 f"🕐 _{now.strftime('%d/%m/%Y %H:%M')} (Brasilia)_\n"
                 f"⚠️ _Nao e recomendacao de investimento_"
