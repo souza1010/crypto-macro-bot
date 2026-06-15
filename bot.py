@@ -130,44 +130,56 @@ def calc_rsi(closes, period=14):
     return round(100 - (100 / (1 + rs)), 1)
 
 
+# Mapa de simbolos USDT -> KuCoin (usa hifen: BTC-USDT)
+def to_kucoin_symbol(symbol_usdt):
+    """Converte BTCUSDT -> BTC-USDT para KuCoin."""
+    if symbol_usdt.endswith("USDT"):
+        return symbol_usdt[:-4] + "-USDT"
+    if symbol_usdt.endswith("BTC"):
+        return symbol_usdt[:-3] + "-BTC"
+    return symbol_usdt
+
+
 async def fetch_binance_klines(symbol, interval, limit=100):
     """
-    Busca candles via Bybit (sem bloqueio geografico nos EUA).
-    Bybit usa mesma logica de klines, formato compativel com Binance.
-    Intervalo: 1 5 15 30 60 120 240 360 720 D W M
+    Busca candles via KuCoin — funciona no Railway US sem bloqueio.
+    Converte automaticamente simbolo e intervalo para formato KuCoin.
+    KuCoin intervalos: 1min 3min 5min 15min 30min 1hour 2hour 4hour
+                       6hour 8hour 12hour 1day 1week
     """
-    # Mapa de intervalos Binance -> Bybit
     interval_map = {
-        "1m": "1", "5m": "5", "15m": "15", "30m": "30",
-        "1h": "60", "2h": "120", "4h": "240", "6h": "360",
-        "12h": "720", "1d": "D", "1w": "W", "1M": "M",
+        "1m": "1min",  "3m": "3min",  "5m": "5min",
+        "15m": "15min", "30m": "30min",
+        "1h": "1hour",  "2h": "2hour",  "4h": "4hour",
+        "6h": "6hour",  "8h": "8hour",  "12h": "12hour",
+        "1d": "1day",   "1w": "1week",
     }
-    bybit_interval = interval_map.get(interval, interval)
+    kucoin_interval = interval_map.get(interval, "1day")
+    kucoin_symbol   = to_kucoin_symbol(symbol)
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                "https://api.bybit.com/v5/market/kline",
+                "https://api.kucoin.com/api/v1/market/candles",
                 params={
-                    "category": "spot",
-                    "symbol":   symbol,
-                    "interval": bybit_interval,
-                    "limit":    limit,
+                    "type":     kucoin_interval,
+                    "symbol":   kucoin_symbol,
+                    "pageSize": limit,
                 },
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
-            if data.get("retCode") != 0:
-                logger.debug(f"Bybit erro {symbol} {interval}: {data.get('retMsg')}")
+            if data.get("code") != "200000":
+                logger.debug(f"KuCoin erro {kucoin_symbol} {interval}: {data.get('msg')}")
                 return []
-            # Bybit retorna [timestamp, open, high, low, close, volume, turnover]
-            # Binance retorna [timestamp, open, high, low, close, volume, ...]
-            # Formato compativel — close esta na posicao 4
-            raw = data["result"]["list"]
-            # Bybit retorna do mais recente para o mais antigo — invertemos
+            # KuCoin retorna [timestamp, open, close, high, low, volume, amount]
+            # ATENCAO: posicao 2 = close (diferente da Binance que e posicao 4)
+            # Retorna do mais recente para o mais antigo — invertemos
+            raw = data.get("data", [])
             return list(reversed(raw))
     except Exception as e:
-        logger.debug(f"Bybit klines erro {symbol} {interval}: {e}")
+        logger.debug(f"KuCoin klines erro {kucoin_symbol} {interval}: {e}")
         return []
 
 
@@ -188,7 +200,8 @@ async def fetch_binance_trend(symbol, interval, limit=50):
     candles = await fetch_binance_klines(symbol, interval, limit)
     if not candles or len(candles) < 50:
         return None
-    closes = [float(c[4]) for c in candles]
+    # KuCoin: posicao 2 = close
+    closes = [float(c[2]) for c in candles]
     mm20 = sum(closes[-20:]) / 20
     mm50 = sum(closes[-50:]) / 50
     return mm20 > mm50
@@ -199,11 +212,14 @@ async def fetch_binance_pair_trend(symbol_base, interval="1d", limit=50):
     Verifica se a moeda esta em tendencia de alta contra BTC.
     Ex: SOLUSDT e SOLBTC - se SOLBTC subindo, SOL mais forte que BTC.
     """
+    # Par vs BTC no formato KuCoin: BTC-USDT -> BTC-BTC nao existe
+    # Usamos SOL-BTC, ETH-BTC etc
     btc_pair = symbol_base.replace("USDT", "BTC")
     candles = await fetch_binance_klines(btc_pair, interval, limit)
     if not candles or len(candles) < 20:
         return None
-    closes = [float(c[4]) for c in candles]
+    # KuCoin: posicao 2 = close
+    closes = [float(c[2]) for c in candles]
     mm20 = sum(closes[-20:]) / 20
     mm50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else sum(closes) / len(closes)
     return mm20 > mm50
