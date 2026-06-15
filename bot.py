@@ -131,18 +131,43 @@ def calc_rsi(closes, period=14):
 
 
 async def fetch_binance_klines(symbol, interval, limit=100):
-    """Busca candles da Binance."""
+    """
+    Busca candles via Bybit (sem bloqueio geografico nos EUA).
+    Bybit usa mesma logica de klines, formato compativel com Binance.
+    Intervalo: 1 5 15 30 60 120 240 360 720 D W M
+    """
+    # Mapa de intervalos Binance -> Bybit
+    interval_map = {
+        "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+        "1h": "60", "2h": "120", "4h": "240", "6h": "360",
+        "12h": "720", "1d": "D", "1w": "W", "1M": "M",
+    }
+    bybit_interval = interval_map.get(interval, interval)
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": symbol, "interval": interval, "limit": limit},
+                "https://api.bybit.com/v5/market/kline",
+                params={
+                    "category": "spot",
+                    "symbol":   symbol,
+                    "interval": bybit_interval,
+                    "limit":    limit,
+                },
                 timeout=10,
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if data.get("retCode") != 0:
+                logger.debug(f"Bybit erro {symbol} {interval}: {data.get('retMsg')}")
+                return []
+            # Bybit retorna [timestamp, open, high, low, close, volume, turnover]
+            # Binance retorna [timestamp, open, high, low, close, volume, ...]
+            # Formato compativel — close esta na posicao 4
+            raw = data["result"]["list"]
+            # Bybit retorna do mais recente para o mais antigo — invertemos
+            return list(reversed(raw))
     except Exception as e:
-        logger.debug(f"Binance klines erro {symbol} {interval}: {e}")
+        logger.debug(f"Bybit klines erro {symbol} {interval}: {e}")
         return []
 
 
@@ -591,11 +616,15 @@ async def fetch_all_news():
     async with httpx.AsyncClient(headers=headers) as client:
         crypto_tasks = [fetch_rss(url, client, "news")  for url in FEEDS_CRYPTO.values()]
         macro_tasks  = [fetch_rss(url, client, "macro") for url in FEEDS_MACRO.values()]
-        tweet_tasks  = [
-            fetch_nitter_account(handle, username, client)
-            for handle, username in TWITTER_ACCOUNTS.items()
-        ]
-        results = await asyncio.gather(*crypto_tasks, *macro_tasks, *tweet_tasks, return_exceptions=True)
+            # Tweets com delay para evitar rate limit 429
+        tweet_results = []
+        for handle, username in TWITTER_ACCOUNTS.items():
+            await asyncio.sleep(0.8)
+            result = await fetch_nitter_account(handle, username, client)
+            tweet_results.append(result)
+
+        results = await asyncio.gather(*crypto_tasks, *macro_tasks, return_exceptions=True)
+        results = list(results) + tweet_results
         for items in results:
             if isinstance(items, list):
                 all_items.extend(items)
