@@ -12,8 +12,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -268,7 +268,9 @@ async def analyze_coin_full(symbol_usdt):
     Retorna tabela com USDT e BTC para: 5m, 15m, 1h, 4h, 1d, 1w
     """
     timeframes = ["5m", "15m", "1h", "4h", "1d", "1w"]
-    symbol_btc = to_kucoin_symbol(symbol_usdt).replace("-USDT", "-BTC")
+    # Par vs BTC nao faz sentido para BTC e stablecoins
+    base = to_kucoin_symbol(symbol_usdt).replace("-USDT", "")
+    symbol_btc = f"{base}-BTC" if base not in ["BTC", "USDT", "USDC", "BUSD", "DAI"] else None
 
     result = {"usdt": {}, "btc": {}}
 
@@ -279,9 +281,13 @@ async def analyze_coin_full(symbol_usdt):
         rsi_usdt   = await fetch_binance_rsi(symbol_usdt, tf, 60)
         result["usdt"][tf] = {"trend": trend_usdt, "rsi": rsi_usdt}
 
-        # Par BTC
-        trend_btc = await fetch_binance_trend(symbol_btc, tf, 60)
-        rsi_btc   = await fetch_binance_rsi(symbol_btc, tf, 60)
+        # Par BTC (pula se for BTC ou stablecoin)
+        if symbol_btc:
+            trend_btc = await fetch_binance_trend(symbol_btc, tf, 60)
+            rsi_btc   = await fetch_binance_rsi(symbol_btc, tf, 60)
+        else:
+            trend_btc = None
+            rsi_btc   = None
         result["btc"][tf] = {"trend": trend_btc, "rsi": rsi_btc}
 
     return result
@@ -1111,6 +1117,269 @@ async def check_fomc_alert(bot):
 #  COMANDOS DO BOT
 # ===================================================================
 
+
+async def check_setup_sc(analysis):
+    """
+    Verifica setup de SOBRECOMPRADO (short/saida):
+    OBRIGATORIO:
+      - 1w + 1d + 4h em tendencia de BAIXA no par USDT
+      - 1h SC (RSI > 70) + pelo menos 1 entre 5m ou 15m SC
+    """
+    usdt = analysis["usdt"]
+
+    # Tendencia macro em BAIXA
+    macro_baixa = (
+        usdt.get("1w", {}).get("trend") == False and
+        usdt.get("1d", {}).get("trend") == False and
+        usdt.get("4h", {}).get("trend") == False
+    )
+    if not macro_baixa:
+        return False, 0
+
+    # RSI curto prazo sobrecomprado
+    rsi_1h  = usdt.get("1h",  {}).get("rsi")
+    rsi_15m = usdt.get("15m", {}).get("rsi")
+    rsi_5m  = usdt.get("5m",  {}).get("rsi")
+
+    if rsi_1h is None or rsi_1h <= 70:
+        return False, 0
+
+    short_sc = sum([
+        1 if (rsi_15m and rsi_15m > 70) else 0,
+        1 if (rsi_5m  and rsi_5m  > 70) else 0,
+    ])
+    if short_sc < 1:
+        return False, 0
+
+    # Calcula score
+    score = 3
+    if rsi_1h > 80:   score += 1
+    if rsi_15m and rsi_15m > 80: score += 1
+    if rsi_5m  and rsi_5m  > 80: score += 1
+
+    # Bonus BTC — par BTC tambem em baixa nos TFs macro
+    btc = analysis["btc"]
+    btc_macro = sum([
+        1 if btc.get("1w", {}).get("trend") == False else 0,
+        1 if btc.get("1d", {}).get("trend") == False else 0,
+        1 if btc.get("4h", {}).get("trend") == False else 0,
+    ])
+    score += btc_macro
+
+    return True, score
+
+
+async def scan_top50_sc():
+    """
+    Scanner Top 50 sobrecomprado:
+    FILTRO: 1w+1d+4h em BAIXA + 1h SC + (15m ou 5m SC)
+    INFO EXTRA: par BTC com tendencia em cada timeframe
+    """
+    logger.info("Iniciando scan Top 50 SC (sobrecomprado)...")
+    coins = await fetch_top50()
+    if not coins:
+        return []
+
+    opportunities = []
+
+    for coin in coins:
+        symbol_usdt = COINGECKO_TO_BINANCE.get(coin["id"])
+        if not symbol_usdt:
+            continue
+
+        logger.info(f"SC Analisando {coin['symbol'].upper()}...")
+        await asyncio.sleep(0.3)
+
+        analysis = await analyze_coin_full(symbol_usdt)
+        passed, score = check_setup_sc(analysis)
+        if not passed:
+            continue
+
+        change_24h = coin.get("price_change_percentage_24h_in_currency", 0) or 0
+        change_7d  = coin.get("price_change_percentage_7d_in_currency", 0) or 0
+
+        opportunities.append({
+            "id":           coin["id"],
+            "symbol":       coin["symbol"].upper(),
+            "name":         coin["name"],
+            "price":        coin["current_price"],
+            "change_24h":   change_24h,
+            "change_7d":    change_7d,
+            "analysis":     analysis,
+            "signal_score": score,
+        })
+        logger.info(f"✅ SC Setup: {coin['symbol'].upper()} score={score}")
+
+    opportunities.sort(key=lambda x: x["signal_score"], reverse=True)
+    logger.info(f"Scan SC concluido: {len(opportunities)} setups encontrados")
+    return opportunities
+
+
+def format_sc_list(opportunities, now):
+    """Formata lista de sobrecomprados para o Telegram."""
+    if not opportunities:
+        return (
+            f"🔴 *SCANNER SC TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*\n"
+            f"{'─'*30}\n"
+            f"Nenhum setup SC encontrado no momento.\n"
+            f"_Aguardando: 1w+1d+4h em baixa + 1h/15m/5m sobrecomprado_"
+        )
+
+    lines = [
+        f"🔴 *SCANNER SC TOP 50 — {now.strftime('%d/%m/%Y %H:%M')}*",
+        f"_Tendencia baixista + RSI SC curto prazo + par BTC_",
+        f"{'─'*30}",
+    ]
+
+    for i, coin in enumerate(opportunities[:5], 1):
+        lines.append(f"*{i}. {coin['symbol']}* | Score: `{coin['signal_score']}` | 24h: `{coin['change_24h']:+.1f}%`")
+        lines.append(format_coin_table(coin['symbol'], coin['price'], coin['analysis']))
+        lines.append("─"*30)
+
+    lines.append(f"_Total: {len(opportunities)} setups SC | Confirme no grafico!_")
+    lines.append("⚠️ _Nao e recomendacao de investimento_")
+    return "\n".join(lines)
+
+
+async def cmd_scanner_sc(update, context):
+    """Scanner de sobrecomprado — potencial short ou saida de posicao."""
+    await update.message.reply_text(
+        "🔴 *Rodando scanner SC Top 50...*\n_Analise multi-timeframe em andamento. Aguarde ate 3 minutos._",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    now           = datetime.now(TIMEZONE)
+    opportunities = await scan_top50_sc()
+    msg           = format_sc_list(opportunities, now)
+    await update.message.reply_text(msg[:4096], parse_mode=ParseMode.MARKDOWN)
+
+
+def get_main_panel():
+    """Retorna teclado inline com todos os comandos do bot."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📡 Status",      callback_data="status"),
+            InlineKeyboardButton("🧠 Resumo",      callback_data="resumo"),
+        ],
+        [
+            InlineKeyboardButton("🟢 Scanner SV",  callback_data="scanner"),
+            InlineKeyboardButton("🔴 Scanner SC",  callback_data="scanner_sc"),
+        ],
+        [
+            InlineKeyboardButton("📊 RSI",         callback_data="rsi"),
+            InlineKeyboardButton("📚 Ajuda",       callback_data="ajuda"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def cmd_painel(update, context):
+    """Exibe painel com botoes para todos os comandos."""
+    await update.message.reply_text(
+        "🎛 *CRYPTO MACRO RADAR*\n_Escolha uma opcao:_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_panel(),
+    )
+
+
+async def handle_callback(update, context):
+    """Processa cliques nos botoes do painel."""
+    query = update.callback_query
+    await query.answer()
+
+    cmd = query.data
+    # Cria um update fake apontando para a mensagem do callback
+    # para reusar as funcoes de comando existentes
+    if cmd == "status":
+        await query.message.reply_text("⏳ Buscando dados...", parse_mode=ParseMode.MARKDOWN)
+        prices, fear_greed, dxy, market = await asyncio.gather(
+            fetch_prices(), fetch_fear_greed(), fetch_dxy(), fetch_market_data()
+        )
+        msg = format_status(prices, fear_greed, dxy, market) + "_Dados em tempo real_"
+        await query.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+    elif cmd == "resumo":
+        await query.message.reply_text("🧠 Gerando analise macro com IA...", parse_mode=ParseMode.MARKDOWN)
+        await send_daily_summary(context.bot)
+
+    elif cmd == "scanner":
+        await query.message.reply_text(
+            "🔍 *Rodando scanner SV Top 50...*\n_Aguarde ate 3 minutos._",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        now  = datetime.now(TIMEZONE)
+        opps = await scan_top50_opportunities()
+        msg  = format_opportunity_list(opps, now)
+        await query.message.reply_text(msg[:4096], parse_mode=ParseMode.MARKDOWN)
+
+    elif cmd == "scanner_sc":
+        await query.message.reply_text(
+            "🔴 *Rodando scanner SC Top 50...*\n_Aguarde ate 3 minutos._",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        now  = datetime.now(TIMEZONE)
+        opps = await scan_top50_sc()
+        msg  = format_sc_list(opps, now)
+        await query.message.reply_text(msg[:4096], parse_mode=ParseMode.MARKDOWN)
+
+    elif cmd == "rsi":
+        await query.message.reply_text("📊 Calculando RSI via KuCoin...", parse_mode=ParseMode.MARKDOWN)
+        prices = await fetch_prices()
+
+        def rsi_label(v):
+            if v is None: return "N/A"
+            if v < 20:  return f"`{v}` 🔴 _Extremo SV_"
+            if v < 30:  return f"`{v}` 🟠 _SV_"
+            if v > 80:  return f"`{v}` 🟡 _Extremo SC_"
+            if v > 70:  return f"`{v}` 🟡 _SC_"
+            return f"`{v}` ⚪"
+
+        lines = ["📊 *RSI — MOEDAS MONITORADAS (KuCoin)*\n" + "─"*30]
+        for coin_id, symbol in CRYPTO_WATCH.items():
+            price   = prices.get(coin_id, {}).get("usd", 0)
+            bsymbol = COINGECKO_TO_BINANCE.get(coin_id)
+            if bsymbol:
+                rsi_1h, rsi_4h, rsi_1d = await asyncio.gather(
+                    fetch_binance_rsi(bsymbol, "1h"),
+                    fetch_binance_rsi(bsymbol, "4h"),
+                    fetch_binance_rsi(bsymbol, "1d"),
+                )
+            else:
+                rsi_1h = rsi_4h = rsi_1d = None
+            lines.append(
+                f"*{symbol}* — `${price:,.4f}`\n"
+                f"  1h: {rsi_label(rsi_1h)} | 4h: {rsi_label(rsi_4h)} | 1d: {rsi_label(rsi_1d)}\n"
+            )
+        lines.append("─"*30 + "\n_SV=Sobrevendido | SC=Sobrecomprado | <20=Extremo_")
+        await query.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    elif cmd == "ajuda":
+        await query.message.reply_text(
+            "*Comandos — Crypto Macro Radar v4.0*\n\n"
+            "/painel — Painel com botoes\n"
+            "/status — Painel completo de mercado\n"
+            "/resumo — Briefing macro com IA\n"
+            "/scanner — Scanner SV Top 50\n"
+            "/scanner_sc — Scanner SC Top 50\n"
+            "/rsi — RSI atual via KuCoin\n"
+            "/ajuda — Esta mensagem\n\n"
+            "*Scanner SV busca:*\n"
+            "✅ 1w+1d+4h em alta\n"
+            "✅ 1h SV + 15m ou 5m SV\n"
+            "✅ Par MOEDA/BTC informativo\n\n"
+            "*Scanner SC busca:*\n"
+            "🔴 1w+1d+4h em baixa\n"
+            "🔴 1h SC + 15m ou 5m SC\n"
+            "🔴 Par MOEDA/BTC informativo",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    # Mostra painel novamente apos cada acao
+    await query.message.reply_text(
+        "🎛 *CRYPTO MACRO RADAR*\n_Escolha uma opcao:_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_panel(),
+    )
+
 async def cmd_start(update, context):
     chat_id = update.effective_chat.id
     fomc    = get_next_fomc()
@@ -1132,6 +1401,7 @@ async def cmd_start(update, context):
         f"⚠️ Alerta FOMC: 1h antes\n\n"
         f"{fomc_line}",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_panel(),
     )
 
 
@@ -1228,12 +1498,15 @@ def main():
         raise ValueError("TELEGRAM_CHAT_ID nao configurado!")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("status",  cmd_status))
-    app.add_handler(CommandHandler("resumo",  cmd_resumo))
-    app.add_handler(CommandHandler("scanner", cmd_scanner))
-    app.add_handler(CommandHandler("rsi",     cmd_rsi))
-    app.add_handler(CommandHandler("ajuda",   cmd_ajuda))
+    app.add_handler(CommandHandler("start",      cmd_start))
+    app.add_handler(CommandHandler("status",     cmd_status))
+    app.add_handler(CommandHandler("resumo",     cmd_resumo))
+    app.add_handler(CommandHandler("scanner",    cmd_scanner))
+    app.add_handler(CommandHandler("scanner_sc", cmd_scanner_sc))
+    app.add_handler(CommandHandler("painel",     cmd_painel))
+    app.add_handler(CommandHandler("rsi",        cmd_rsi))
+    app.add_handler(CommandHandler("ajuda",      cmd_ajuda))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(send_daily_summary,          "cron",     hour=9,  minute=0,  args=[app.bot])
