@@ -86,23 +86,63 @@ CRYPTO_WATCH = {
     "cardano":  "ADA",
 }
 
-# Mapeamento CoinGecko -> Binance
-COINGECKO_TO_BINANCE = {
-    "bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "tether": "USDTUSD",
-    "binancecoin": "BNBUSDT", "solana": "SOLUSDT", "ripple": "XRPUSDT",
-    "usd-coin": "USDCUSDT", "dogecoin": "DOGEUSDT", "cardano": "ADAUSDT",
-    "avalanche-2": "AVAXUSDT", "shiba-inu": "SHIBUSDT", "polkadot": "DOTUSDT",
-    "chainlink": "LINKUSDT", "bitcoin-cash": "BCHUSDT", "near": "NEARUSDT",
-    "litecoin": "LTCUSDT", "uniswap": "UNIUSDT", "aptos": "APTUSDT",
-    "stellar": "XLMUSDT", "ethereum-classic": "ETCUSDT", "filecoin": "FILUSDT",
-    "hedera-hashgraph": "HBARUSDT", "arbitrum": "ARBUSDT", "vechain": "VETUSDT",
-    "injective-protocol": "INJUSDT", "sui": "SUIUSDT", "pepe": "PEPEUSDT",
-    "maker": "MKRUSDT", "aave": "AAVEUSDT", "matic-network": "MATICUSDT",
-    "atom": "ATOMUSDT", "tron": "TRXUSDT", "algorand": "ALGOUSDT",
-    "render-token": "RENDERUSDT", "optimism": "OPUSDT", "the-graph": "GRTUSDT",
-    "fantom": "FTMUSDT", "the-sandbox": "SANDUSDT", "decentraland": "MANAUSDT",
-    "axie-infinity": "AXSUSDT", "flow": "FLOWUSDT", "gala": "GALAUSDT",
+# Mapeamento para RSI — usa formato KuCoin
+CRYPTO_WATCH_KUCOIN = {
+    "bitcoin":  "BTC-USDT",
+    "ethereum": "ETH-USDT",
+    "solana":   "SOL-USDT",
+    "ripple":   "XRP-USDT",
+    "cardano":  "ADA-USDT",
 }
+
+# Mapeamento CoinGecko -> Binance
+# Mapeamento CoinGecko ID -> simbolo KuCoin USDT
+# Stablecoins (USDT, USDC) sao excluidas — nao fazem sentido para analise tecnica
+COINGECKO_TO_BINANCE = {
+    "bitcoin":            "BTC-USDT",
+    "ethereum":           "ETH-USDT",
+    "binancecoin":        "BNB-USDT",
+    "solana":             "SOL-USDT",
+    "ripple":             "XRP-USDT",
+    "dogecoin":           "DOGE-USDT",
+    "cardano":            "ADA-USDT",
+    "avalanche-2":        "AVAX-USDT",
+    "shiba-inu":          "SHIB-USDT",
+    "polkadot":           "DOT-USDT",
+    "chainlink":          "LINK-USDT",
+    "bitcoin-cash":       "BCH-USDT",
+    "near":               "NEAR-USDT",
+    "litecoin":           "LTC-USDT",
+    "uniswap":            "UNI-USDT",
+    "aptos":              "APT-USDT",
+    "stellar":            "XLM-USDT",
+    "ethereum-classic":   "ETC-USDT",
+    "filecoin":           "FIL-USDT",
+    "hedera-hashgraph":   "HBAR-USDT",
+    "arbitrum":           "ARB-USDT",
+    "vechain":            "VET-USDT",
+    "injective-protocol": "INJ-USDT",
+    "sui":                "SUI-USDT",
+    "pepe":               "PEPE-USDT",
+    "maker":              "MKR-USDT",
+    "aave":               "AAVE-USDT",
+    "matic-network":      "MATIC-USDT",
+    "atom":               "ATOM-USDT",
+    "tron":               "TRX-USDT",
+    "algorand":           "ALGO-USDT",
+    "render-token":       "RENDER-USDT",
+    "optimism":           "OP-USDT",
+    "the-graph":          "GRT-USDT",
+    "fantom":             "FTM-USDT",
+    "the-sandbox":        "SAND-USDT",
+    "decentraland":       "MANA-USDT",
+    "axie-infinity":      "AXS-USDT",
+    "flow":               "FLOW-USDT",
+    "gala":               "GALA-USDT",
+}
+
+# Stablecoins para excluir do scanner
+STABLECOINS = {"tether", "usd-coin", "binance-usd", "dai", "true-usd", "frax"}
 
 MAX_TWEET_AGE_HOURS = 720
 sent_news_cache: set = set()
@@ -130,14 +170,12 @@ def calc_rsi(closes, period=14):
     return round(100 - (100 / (1 + rs)), 1)
 
 
-# Mapa de simbolos USDT -> KuCoin (usa hifen: BTC-USDT)
-def to_kucoin_symbol(symbol_usdt):
-    """Converte BTCUSDT -> BTC-USDT para KuCoin."""
-    if symbol_usdt.endswith("USDT"):
-        return symbol_usdt[:-4] + "-USDT"
-    if symbol_usdt.endswith("BTC"):
-        return symbol_usdt[:-3] + "-BTC"
-    return symbol_usdt
+def to_kucoin_symbol(symbol):
+    """
+    Retorna simbolo ja no formato KuCoin (ex: BTC-USDT).
+    O mapeamento COINGECKO_TO_BINANCE ja usa formato KuCoin direto.
+    """
+    return symbol
 
 
 async def fetch_binance_klines(symbol, interval, limit=100):
@@ -155,7 +193,7 @@ async def fetch_binance_klines(symbol, interval, limit=100):
         "1d": "1day",   "1w": "1week",
     }
     kucoin_interval = interval_map.get(interval, "1day")
-    kucoin_symbol   = to_kucoin_symbol(symbol)
+    kucoin_symbol   = symbol  # Ja no formato KuCoin (ex: BTC-USDT)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -268,9 +306,10 @@ async def analyze_coin_full(symbol_usdt):
     Retorna tabela com USDT e BTC para: 5m, 15m, 1h, 4h, 1d, 1w
     """
     timeframes = ["5m", "15m", "1h", "4h", "1d", "1w"]
-    # Par vs BTC nao faz sentido para BTC e stablecoins
-    base = to_kucoin_symbol(symbol_usdt).replace("-USDT", "")
-    symbol_btc = f"{base}-BTC" if base not in ["BTC", "USDT", "USDC", "BUSD", "DAI"] else None
+    # Par vs BTC — extrai base do simbolo KuCoin (BTC-USDT -> BTC)
+    base = symbol_usdt.replace("-USDT", "")
+    # BTC nao tem par BTC/BTC — pula
+    symbol_btc = f"{base}-BTC" if base != "BTC" else None
 
     result = {"usdt": {}, "btc": {}}
 
@@ -399,10 +438,11 @@ async def scan_top50_opportunities():
 
     for coin in coins:
         symbol_usdt = COINGECKO_TO_BINANCE.get(coin["id"])
-        if not symbol_usdt:
+        # Pula stablecoins e moedas sem mapeamento
+        if not symbol_usdt or coin["id"] in STABLECOINS:
             continue
 
-        logger.info(f"Analisando {coin['symbol'].upper()}...")
+        logger.info(f"Analisando {coin['symbol'].upper()} ({symbol_usdt})...")
         await asyncio.sleep(0.3)
 
         # Analise completa — todos os timeframes, USDT e BTC
@@ -732,21 +772,87 @@ async def fetch_market_data():
 #  FILTRO IA
 # ===================================================================
 
+# Cache de temas recentes para deduplicacao (titulo simplificado -> timestamp)
+_recent_topics: dict = {}
+DEDUP_WINDOW_HOURS = 4  # Mesmo tema nas ultimas 4h e descartado
+
+
+def _extract_topic(title: str) -> str:
+    """Extrai tema principal do titulo para deduplicacao."""
+    title_lower = title.lower()
+    # Temas principais que tendem a gerar multiplas noticias
+    topics = [
+        "federal reserve", "fed ", "fomc", "interest rate", "powell",
+        "bitcoin etf", "btc etf", "ethereum etf",
+        "sec ", "regulation", "regulat",
+        "hack", "exploit", "stolen",
+        "trump", "tariff", "sanction",
+        "inflation", "cpi", "gdp",
+    ]
+    for topic in topics:
+        if topic in title_lower:
+            return topic.strip()
+    # Se nao tem tema conhecido, usa primeiras 4 palavras
+    words = title_lower.split()[:4]
+    return " ".join(words)
+
+
+def _is_duplicate_topic(title: str) -> bool:
+    """Retorna True se ja enviamos algo sobre esse tema nas ultimas 4h."""
+    now = datetime.now(TIMEZONE)
+    topic = _extract_topic(title)
+
+    # Limpa cache antigo
+    expired = [k for k, t in _recent_topics.items()
+               if (now - t).total_seconds() / 3600 > DEDUP_WINDOW_HOURS]
+    for k in expired:
+        del _recent_topics[k]
+
+    if topic in _recent_topics:
+        age_h = (now - _recent_topics[topic]).total_seconds() / 3600
+        logger.debug(f"Topico duplicado ({age_h:.1f}h): {topic}")
+        return True
+    return False
+
+
+def _register_topic(title: str):
+    """Registra tema como enviado."""
+    topic = _extract_topic(title)
+    _recent_topics[topic] = datetime.now(TIMEZONE)
+
+
 async def filter_relevant_items(items, prices):
+    """
+    Filtro em duas camadas:
+    CAMADA 1 — Score IA >= 7 (relevancia basica)
+    CAMADA 2 — Deduplicacao: mesmo tema nas ultimas 4h? Descarta.
+    """
     if not items or not ANTHROPIC_API_KEY:
         return items
+
     btc_usd    = prices.get("bitcoin", {}).get("usd", 0)
     btc_change = prices.get("bitcoin", {}).get("usd_24h_change", 0)
+
     items_text = ""
     for i, item in enumerate(items):
         source = item.get("twitter_handle", item.get("source_type", "news"))
         items_text += f"{i+1}. [{source}] {item['title']}\n"
+
     prompt = f"""Voce e um filtro de relevancia para traders de Bitcoin e crypto.
 CONTEXTO: BTC ${btc_usd:,.0f} ({btc_change:+.1f}% 24h)
+
 LISTA:
 {items_text}
-Score 0-10 por impacto real no mercado crypto. 9-10=impacto imediato, 7-8=significativo, 0-6=descartar.
-Responda APENAS JSON: {{"scores": [{{"id": 1, "score": 8}}]}}"""
+
+Criterios de score (0-10):
+9-10 = Impacto IMEDIATO e DIRETO: corte/alta de juros Fed, hack > $100M, regulacao aprovada/rejeitada, guerra declarada
+7-8  = Impacto SIGNIFICATIVO: declaracao importante de autoridade, ETF aprovado, parceria grande
+5-6  = Relevante mas nao urgente: analise de mercado, previsao, opiniao
+0-4  = Generico, duplicado, sem impacto real
+
+Descarte tudo abaixo de 7. Seja rigoroso — prefira menos alertas com mais qualidade.
+Responda APENAS JSON sem texto extra: {{"scores": [{{"id": 1, "score": 8}}]}}"""
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -769,14 +875,28 @@ Responda APENAS JSON: {{"scores": [{{"id": 1, "score": 8}}]}}"""
             content = re.sub(r"```json|```", "", content).strip()
             result  = json.loads(content)
             scores  = {s["id"]: s["score"] for s in result.get("scores", [])}
-            filtered = []
+
+            # CAMADA 1: Score >= 7
+            layer1 = []
             for i, item in enumerate(items):
                 score = scores.get(i + 1, 0)
                 if score >= 7:
                     item["relevance_score"] = score
-                    filtered.append(item)
-            logger.info(f"Filtro IA: {len(filtered)}/{len(items)} relevantes")
-            return filtered
+                    layer1.append(item)
+
+            logger.info(f"Camada 1 (score>=7): {len(layer1)}/{len(items)} passaram")
+
+            # CAMADA 2: Deduplicacao por tema (4h)
+            layer2 = []
+            for item in layer1:
+                if _is_duplicate_topic(item["title"]):
+                    logger.info(f"Deduplicated: {item['title'][:60]}")
+                    continue
+                layer2.append(item)
+
+            logger.info(f"Camada 2 (dedup): {len(layer2)}/{len(layer1)} passaram")
+            return layer2
+
     except Exception as e:
         logger.warning(f"Erro no filtro IA: {e}")
         return items
@@ -1040,6 +1160,7 @@ async def check_critical_news(bot):
                     + f"\n\n🔗 [Ver noticia]({item.get('link','#')})\n"
                     + f"⭐ _Relevancia: {score}/10_"
                 )
+            _register_topic(item["title"])
             await bot.send_message(chat_id=CHAT_ID, text=msg[:4096], parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
             await asyncio.sleep(5)
     except Exception as e:
@@ -1053,7 +1174,7 @@ async def check_rsi_alerts(bot):
         for coin_id, symbol in CRYPTO_WATCH.items():
             price_data = prices.get(coin_id, {})
             change_24h = price_data.get("usd_24h_change", 0)
-            bsymbol    = COINGECKO_TO_BINANCE.get(coin_id)
+            bsymbol = CRYPTO_WATCH_KUCOIN.get(coin_id)
             if bsymbol:
                 rsi_1h = await fetch_binance_rsi(bsymbol, "1h")
                 rsi_4h = await fetch_binance_rsi(bsymbol, "4h")
@@ -1184,10 +1305,10 @@ async def scan_top50_sc():
 
     for coin in coins:
         symbol_usdt = COINGECKO_TO_BINANCE.get(coin["id"])
-        if not symbol_usdt:
+        if not symbol_usdt or coin["id"] in STABLECOINS:
             continue
 
-        logger.info(f"SC Analisando {coin['symbol'].upper()}...")
+        logger.info(f"SC Analisando {coin['symbol'].upper()} ({symbol_usdt})...")
         await asyncio.sleep(0.3)
 
         analysis = await analyze_coin_full(symbol_usdt)
